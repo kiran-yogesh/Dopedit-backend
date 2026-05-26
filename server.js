@@ -115,7 +115,7 @@ app.post('/api/contact', async (req, res) => {
 
     const notificationText = `Hello DOPEDITS STUDIO,\n\nYou received a new inquiry from your website!\n\nName: ${name}\nEmail: ${email}\nPhone: ${phone}\nService Needed: ${service}${packageInfo}\n\nMessage:\n${message}`;
 
-    // Send email using Nodemailer
+    // Send email using Nodemailer (in background)
     try {
       if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
         const transporter = nodemailer.createTransport({
@@ -133,17 +133,22 @@ app.post('/api/contact', async (req, res) => {
           text: notificationText
         };
 
-        await transporter.sendMail(mailOptions);
-        console.log('Inquiry notification email sent successfully to kiranyogesh29@gmail.com');
+        transporter.sendMail(mailOptions)
+          .then(() => console.log('Inquiry notification email sent successfully to kiranyogesh29@gmail.com'))
+          .catch(emailError => console.error('Failed to send inquiry email:', emailError));
       } else {
         console.log('Email not sent: EMAIL_USER or EMAIL_PASS missing in .env');
       }
     } catch (emailError) {
-      console.error('Failed to send email:', emailError);
+      console.error('Failed to initialize contact email transporter:', emailError);
     }
 
-    // Send programmatic WhatsApp notification to admin
-    await sendWhatsAppNotification(notificationText);
+    // Send programmatic WhatsApp notification to admin (in background)
+    sendWhatsAppNotification(notificationText)
+      .then(success => {
+        if (success) console.log('WhatsApp notification sent successfully.');
+      })
+      .catch(error => console.error('Failed to send WhatsApp notification:', error));
     
     res.status(201).json({ message: 'Request submitted successfully!' });
   } catch (error) {
@@ -314,14 +319,18 @@ app.post('/api/payment/verify', async (req, res) => {
           `
         };
 
-        await transporter.sendMail(clientMailOptions);
-        await transporter.sendMail(adminMailOptions);
-        console.log('Payment confirmation emails successfully sent to client and admin.');
+        transporter.sendMail(clientMailOptions)
+          .then(() => console.log('Payment confirmation email successfully sent to client.'))
+          .catch(emailError => console.error('Failed to send payment confirmation email to client:', emailError));
+
+        transporter.sendMail(adminMailOptions)
+          .then(() => console.log('Payment notification email successfully sent to admin.'))
+          .catch(emailError => console.error('Failed to send payment notification email to admin:', emailError));
       } else {
         console.log('Payment emails not sent: EMAIL_USER or EMAIL_PASS missing in .env');
       }
     } catch (emailError) {
-      console.error('Failed to send payment confirmation email:', emailError);
+      console.error('Failed to initialize email transporter:', emailError);
     }
 
     res.status(200).json({ message: 'Payment verified and confirmed successfully!' });
