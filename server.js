@@ -4,18 +4,46 @@ const cors = require('cors');
 const dotenv = require('dotenv');
 const nodemailer = require('nodemailer');
 const Razorpay = require('razorpay');
+const helmet = require('helmet');
+const compression = require('compression');
+const rateLimit = require('express-rate-limit');
+const cluster = require('cluster');
+const os = require('os');
 
 dotenv.config();
 
 const app = express();
 
+// Secure backend by setting various HTTP headers
+app.use(helmet());
+
+// Enable Gzip compression to reduce network payload size and improve speed
+app.use(compression());
+
+app.use(cors());
+app.use(express.json());
+
+// Global Rate Limiter to protect all API endpoints from basic DDoS
+const globalLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 150, // limit each IP to 150 requests per windowMs
+  message: { error: 'Too many requests from this IP, please try again after 15 minutes.' }
+});
+
+// Strict Rate Limiter for payments & submissions to prevent abuse/spam
+const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 15, // limit each IP to 15 submissions/orders per 15 minutes
+  message: { error: 'Too many submissions from this IP, please try again after 15 minutes.' }
+});
+
+// Apply global rate limiting to all api endpoints
+app.use('/api/', globalLimiter);
+
 const razorpay = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_z37ZcEwXJd4rS0',
   key_secret: process.env.RAZORPAY_KEY_SECRET || '6HlP9K9Kz5iF9g5cE5uN6f4A'
 });
-
-app.use(cors());
-app.use(express.json());
 
 // Basic Route
 app.get('/', (req, res) => {
@@ -48,6 +76,9 @@ const PaymentSchema = new mongoose.Schema({
   status: { type: String, enum: ['pending', 'completed', 'failed'], default: 'pending' },
   createdAt: { type: Date, default: Date.now }
 });
+
+// Index orderId to accelerate payment verification queries under 10x traffic loads
+PaymentSchema.index({ orderId: 1 });
 
 const Payment = mongoose.model('Payment', PaymentSchema);
 
@@ -95,8 +126,8 @@ const sendWhatsAppNotification = async (messageText) => {
   }
 };
 
-// Endpoint to handle form submissions
-app.post('/api/contact', async (req, res) => {
+// Endpoint to handle form submissions (protected by strict rate limiter)
+app.post('/api/contact', strictLimiter, async (req, res) => {
   try {
     const { name, email, phone, service, message, selectedPackage } = req.body;
     
@@ -158,8 +189,8 @@ app.post('/api/contact', async (req, res) => {
 });
 
 
-// Endpoint to create a Razorpay order
-app.post('/api/payment/order', async (req, res) => {
+// Endpoint to create a Razorpay order (protected by strict rate limiter)
+app.post('/api/payment/order', strictLimiter, async (req, res) => {
   try {
     const { name, email, phone, packageName, amount } = req.body;
     
@@ -343,16 +374,39 @@ app.post('/api/payment/verify', async (req, res) => {
 const PORT = process.env.PORT || 5000;
 const MONGO_URI = process.env.MONGO_URI || 'mongodb+srv://kiranyogesh29_db_user:Yiz3vjm5EVEZyJP7@cluster0.2g8ir7m.mongodb.net/?appName=Cluster0';
 
-mongoose.connect(MONGO_URI)
-  .then(() => {
-    console.log('Connected to MongoDB');
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT}`);
-    });
-  })
-  .catch((err) => {
-    console.error('MongoDB connection failed. Starting server in mock mode.');
-    app.listen(PORT, () => {
-      console.log(`Server running on port ${PORT} (Mock Mode)`);
-    });
+// Native Multi-Core Node.js Clustering implementation for 10x traffic processing capacity
+if (cluster.isMaster) {
+  const numCPUs = os.cpus().length || 1;
+  console.log(`Master process ${process.pid} is running. Spawning ${numCPUs} multi-threaded workers...`);
+
+  // Spawn matching workers to run on each available CPU core
+  for (let i = 0; i < numCPUs; i++) {
+    cluster.fork();
+  }
+
+  // Auto-recovery: If any worker process crashes, spawn a replacement worker immediately
+  cluster.on('exit', (worker, code, signal) => {
+    console.log(`Worker process ${worker.process.pid} died. Spawning replacement worker process...`);
+    cluster.fork();
   });
+} else {
+  // Worker processes handle network traffic concurrently and share the PORT connection
+  mongoose.connect(MONGO_URI, {
+    maxPoolSize: 50,           // Optimize database connection pool to handle concurrent load
+    minPoolSize: 10,           // Pre-warm database connections for instant request readiness
+    socketTimeoutMS: 45000,    // Protect database queries from silent locks
+    serverSelectionTimeoutMS: 5000
+  })
+    .then(() => {
+      console.log(`Worker ${process.pid} successfully connected to MongoDB`);
+      app.listen(PORT, () => {
+        console.log(`Worker ${process.pid} listening on port ${PORT}`);
+      });
+    })
+    .catch((err) => {
+      console.error(`MongoDB connection failed on worker ${process.pid}. Reverting to Mock Mode.`);
+      app.listen(PORT, () => {
+        console.log(`Worker ${process.pid} listening on port ${PORT} (Mock Mode)`);
+      });
+    });
+}
