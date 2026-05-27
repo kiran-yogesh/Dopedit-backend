@@ -12,6 +12,15 @@ const os = require('os');
 
 dotenv.config();
 
+// Cache environment variables at module scope to avoid repeated process.env lookup overhead
+const EMAIL_USER = process.env.EMAIL_USER;
+const EMAIL_PASS = process.env.EMAIL_PASS;
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || 'rzp_test_z37ZcEwXJd4rS0';
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || '6HlP9K9Kz5iF9g5cE5uN6f4A';
+const WHATSAPP_ACCESS_TOKEN = process.env.WHATSAPP_ACCESS_TOKEN;
+const WHATSAPP_PHONE_NUMBER_ID = process.env.WHATSAPP_PHONE_NUMBER_ID;
+const WHATSAPP_RECIPIENT_PHONE = process.env.WHATSAPP_RECIPIENT_PHONE || '919100961733';
+
 const app = express();
 
 // Secure backend by setting various HTTP headers
@@ -40,9 +49,22 @@ const strictLimiter = rateLimit({
 // Apply global rate limiting to all api endpoints
 app.use('/api/', globalLimiter);
 
+// Configure a single global pooled Nodemailer transporter
+// The 'pool: true' keeps SMTP connections active, drastically reducing email dispatch latency under high load
+const transporter = (EMAIL_USER && EMAIL_PASS) ? nodemailer.createTransport({
+  pool: true,
+  maxConnections: 10,
+  maxMessages: 100,
+  service: 'gmail',
+  auth: {
+    user: EMAIL_USER,
+    pass: EMAIL_PASS
+  }
+}) : null;
+
 const razorpay = new Razorpay({
-  key_id: process.env.RAZORPAY_KEY_ID || 'rzp_test_z37ZcEwXJd4rS0',
-  key_secret: process.env.RAZORPAY_KEY_SECRET || '6HlP9K9Kz5iF9g5cE5uN6f4A'
+  key_id: RAZORPAY_KEY_ID,
+  key_secret: RAZORPAY_KEY_SECRET
 });
 
 // Basic Route
@@ -82,29 +104,25 @@ PaymentSchema.index({ orderId: 1 });
 
 const Payment = mongoose.model('Payment', PaymentSchema);
 
-// Programmatic WhatsApp notification helper via Meta WhatsApp Cloud API
+// Programmatic WhatsApp notification helper via Meta WhatsApp Cloud API (optimized using module variables)
 const sendWhatsAppNotification = async (messageText) => {
-  const token = process.env.WHATSAPP_ACCESS_TOKEN;
-  const phoneId = process.env.WHATSAPP_PHONE_NUMBER_ID;
-  const recipient = process.env.WHATSAPP_RECIPIENT_PHONE || '919100961733';
-
-  if (!token || !phoneId || token === 'your_meta_system_user_access_token' || phoneId === 'your_meta_phone_number_id') {
+  if (!WHATSAPP_ACCESS_TOKEN || !WHATSAPP_PHONE_NUMBER_ID || WHATSAPP_ACCESS_TOKEN === 'your_meta_system_user_access_token' || WHATSAPP_PHONE_NUMBER_ID === 'your_meta_phone_number_id') {
     console.log('WhatsApp notification skipped: API keys are not configured or still placeholders.');
     console.log('Programmatic WhatsApp notification message details:\n', messageText);
     return false;
   }
 
   try {
-    const url = `https://graph.facebook.com/v18.0/${phoneId}/messages`;
+    const url = `https://graph.facebook.com/v18.0/${WHATSAPP_PHONE_NUMBER_ID}/messages`;
     const response = await fetch(url, {
       method: 'POST',
       headers: {
-        'Authorization': `Bearer ${token}`,
+        'Authorization': `Bearer ${WHATSAPP_ACCESS_TOKEN}`,
         'Content-Type': 'application/json'
       },
       body: JSON.stringify({
         messaging_product: 'whatsapp',
-        to: recipient,
+        to: WHATSAPP_RECIPIENT_PHONE,
         type: 'text',
         text: {
           body: messageText
@@ -146,19 +164,11 @@ app.post('/api/contact', strictLimiter, async (req, res) => {
 
     const notificationText = `Hello DOPEDITS STUDIO,\n\nYou received a new inquiry from your website!\n\nName: ${name}\nEmail: ${email}\nPhone: ${phone}\nService Needed: ${service}${packageInfo}\n\nMessage:\n${message}`;
 
-    // Send email using Nodemailer (in background)
+    // Send email using Nodemailer (in background using pre-warmed global SMTP pool)
     try {
-      if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-        const transporter = nodemailer.createTransport({
-          service: 'gmail',
-          auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS
-          }
-        });
-
+      if (transporter) {
         const mailOptions = {
-          from: process.env.EMAIL_USER,
+          from: EMAIL_USER,
           to: 'kiranyogesh29@gmail.com',
           subject: `New Inquiry from ${name} - ${service}`,
           text: notificationText
@@ -171,7 +181,7 @@ app.post('/api/contact', strictLimiter, async (req, res) => {
         console.log('Email not sent: EMAIL_USER or EMAIL_PASS missing in .env');
       }
     } catch (emailError) {
-      console.error('Failed to initialize contact email transporter:', emailError);
+      console.error('Failed to send inquiry notification email:', emailError);
     }
 
     // Send programmatic WhatsApp notification to admin (in background)
@@ -270,20 +280,12 @@ app.post('/api/payment/verify', async (req, res) => {
       console.log('Mock verifying payment (DB disconnected):', { orderId, paymentId });
     }
 
-    // Send styled emails using Nodemailer
+    // Send styled emails using Nodemailer (reusing the pre-warmed global SMTP pool)
     try {
-      if (process.env.EMAIL_USER && process.env.EMAIL_PASS) {
-        const transporter = nodemailer.createTransport({
-          service: 'gmail',
-          auth: {
-            user: process.env.EMAIL_USER,
-            pass: process.env.EMAIL_PASS
-          }
-        });
-
+      if (transporter) {
         // 1. Send confirmation email to client
         const clientMailOptions = {
-          from: `"DOPEDITS STUDIO" <${process.env.EMAIL_USER}>`,
+          from: `"DOPEDITS STUDIO" <${EMAIL_USER}>`,
           to: email,
           subject: `Payment Confirmed! Your DOPEDITS Order is Placed 🎉`,
           html: `
@@ -308,7 +310,7 @@ app.post('/api/payment/verify', async (req, res) => {
 
         // 2. Send notification email to admin
         const adminMailOptions = {
-          from: `"DOPEDITS STUDIO Payments" <${process.env.EMAIL_USER}>`,
+          from: `"DOPEDITS STUDIO Payments" <${EMAIL_USER}>`,
           to: 'kiranyogesh29@gmail.com',
           subject: `🚨 NEW PAYMENT RECEIVED: ₹${amount} for ${packageName}`,
           html: `
@@ -361,7 +363,7 @@ app.post('/api/payment/verify', async (req, res) => {
         console.log('Payment emails not sent: EMAIL_USER or EMAIL_PASS missing in .env');
       }
     } catch (emailError) {
-      console.error('Failed to initialize email transporter:', emailError);
+      console.error('Failed to send payment confirmation emails:', emailError);
     }
 
     res.status(200).json({ message: 'Payment verified and confirmed successfully!' });
